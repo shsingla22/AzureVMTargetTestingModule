@@ -1,21 +1,37 @@
-"""Drop-in digital twin replacement for ``azure.mgmt.compute.ComputeManagementClient``.
+"""Drop-in replacement for ``azure.mgmt.compute.ComputeManagementClient``.
 
-This client exposes the same ``virtual_machine_sizes`` operations interface
-so that code written against the real Azure SDK can be tested locally against
-the E-series digital twin catalog without any Azure credentials.
+Provides the same attribute / method surface that real Azure SDK code
+uses, but backed by the digital-twin simulation engine.  Code written
+against the real SDK can switch to this client with a one-line change
+and run against simulated E-series VMs without Azure credentials.
 
 Compatibility targets:
     - azure-mgmt-compute >= 30.0.0
     - azure-identity     >= 1.15.0
 
-Usage::
+Supported operations
+--------------------
 
-    from azure_vm_digital_twin.sdk_compat import DigitalTwinComputeManagementClient
+``client.virtual_machine_sizes.list(location)``
+    List all E-series VM sizes (mirrors real SDK).
 
-    # No credentials needed -- digital twin is fully offline
-    client = DigitalTwinComputeManagementClient()
-    for size in client.virtual_machine_sizes.list("eastus"):
-        print(size.name, size.number_of_cores, size.memory_in_mb)
+``client.virtual_machines.begin_create_or_update(rg, name, params)``
+    Create a digital-twin VM and enforce its SKU constraints.
+
+``client.virtual_machines.get(rg, name)``
+    Get VM state, power status, and workload results.
+
+``client.virtual_machines.begin_start(rg, name)``
+    Start the VM (activate cgroup sandbox).
+
+``client.virtual_machines.begin_deallocate(rg, name)``
+    Stop the VM (release constraints).
+
+``client.virtual_machines.begin_delete(rg, name)``
+    Delete the VM.
+
+``client.virtual_machines.list(rg)``
+    List all VMs in a resource group.
 """
 
 from __future__ import annotations
@@ -24,8 +40,14 @@ from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
 from azure_vm_digital_twin.e_series_specs import ESeriesCatalog
-from azure_vm_digital_twin.models import VMSize
+from azure_vm_digital_twin.models import VMInstance, VMSize
+from azure_vm_digital_twin.simulator.vm_instance import VMInstanceManager
+from azure_vm_digital_twin.workload.runner import WorkloadRunner
 
+
+# ---------------------------------------------------------------------------
+# VirtualMachineSize (mirrors azure.mgmt.compute.models.VirtualMachineSize)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _VirtualMachineSize:
@@ -72,6 +94,37 @@ def _vm_size_to_sdk(vm: VMSize) -> _VirtualMachineSize:
     )
 
 
+# ---------------------------------------------------------------------------
+# LROPoller stub (mirrors azure.core.polling.LROPoller)
+# ---------------------------------------------------------------------------
+
+class _LROPoller:
+    """Stub for long-running operation pollers.
+
+    In the digital twin everything completes synchronously, so result()
+    just returns the value immediately.
+    """
+
+    def __init__(self, result: Any = None) -> None:
+        self._result = result
+
+    def result(self, timeout: Optional[float] = None) -> Any:
+        return self._result
+
+    def wait(self, timeout: Optional[float] = None) -> None:
+        pass
+
+    def done(self) -> bool:
+        return True
+
+    def status(self) -> str:
+        return "Succeeded"
+
+
+# ---------------------------------------------------------------------------
+# VirtualMachineSizesOperations
+# ---------------------------------------------------------------------------
+
 class VirtualMachineSizesOperations:
     """Mirrors ``ComputeManagementClient.virtual_machine_sizes``.
 
@@ -87,45 +140,207 @@ class VirtualMachineSizesOperations:
         self._catalog = catalog
 
     def list(self, location: str = "eastus", **kwargs: Any) -> Iterator[_VirtualMachineSize]:
-        """List available E-series VM sizes.
-
-        Args:
-            location: Azure region (accepted for API compatibility but ignored
-                      by the digital twin).
-        """
         for vm in self._catalog.list():
             yield _vm_size_to_sdk(vm)
 
 
+# ---------------------------------------------------------------------------
+# VirtualMachinesOperations
+# ---------------------------------------------------------------------------
+
+class VirtualMachinesOperations:
+    """Mirrors ``ComputeManagementClient.virtual_machines``.
+
+    Create / start / stop / delete operations delegate to the
+    VMInstanceManager which enforces resource constraints via cgroups.
+    """
+
+    def __init__(
+        self,
+        instance_manager: VMInstanceManager,
+        runner: Optional[WorkloadRunner] = None,
+    ) -> None:
+        self._mgr = instance_manager
+        self._runner = runner
+
+    def begin_create_or_update(
+        self,
+        resource_group_name: str,
+        vm_name: str,
+        parameters: dict,
+    ) -> _LROPoller:
+        """Create or update a VM.
+
+        ``parameters`` must include ``hardware_profile.vm_size`` or
+        ``properties.hardwareProfile.vmSize``.
+        """
+        vm_size_name = self._extract_vm_size(parameters)
+
+        existing = self._mgr.get(vm_name)
+        if existing is not None:
+            if existing.is_running:
+                self._mgr.stop(vm_name)
+            self._mgr.resize(vm_name, vm_size_name)
+            vm = self._mgr.get(vm_name)
+        else:
+            vm = self._mgr.create(
+                name=vm_name,
+                vm_size_name=vm_size_name,
+                resource_group=resource_group_name,
+                tags=parameters.get("tags", {}),
+            )
+            self._mgr.start(vm_name)
+
+        return _LROPoller(result=vm)
+
+    def get(
+        self,
+        resource_group_name: str,
+        vm_name: str,
+        **kwargs,
+    ) -> Optional[VMInstance]:
+        return self._mgr.get(vm_name)
+
+    def begin_start(
+        self,
+        resource_group_name: str,
+        vm_name: str,
+    ) -> _LROPoller:
+        self._mgr.start(vm_name)
+        return _LROPoller()
+
+    def begin_deallocate(
+        self,
+        resource_group_name: str,
+        vm_name: str,
+    ) -> _LROPoller:
+        self._mgr.deallocate(vm_name)
+        return _LROPoller()
+
+    def begin_power_off(
+        self,
+        resource_group_name: str,
+        vm_name: str,
+    ) -> _LROPoller:
+        self._mgr.stop(vm_name)
+        return _LROPoller()
+
+    def begin_delete(
+        self,
+        resource_group_name: str,
+        vm_name: str,
+    ) -> _LROPoller:
+        self._mgr.delete(vm_name)
+        return _LROPoller()
+
+    def list(
+        self,
+        resource_group_name: str,
+        **kwargs,
+    ) -> Iterator[VMInstance]:
+        for vm in self._mgr.list_instances():
+            if vm.resource_group == resource_group_name:
+                yield vm
+
+    def list_all(self, **kwargs) -> Iterator[VMInstance]:
+        yield from self._mgr.list_instances()
+
+    def instance_view(
+        self,
+        resource_group_name: str,
+        vm_name: str,
+    ) -> dict:
+        vm = self._mgr.get(vm_name)
+        if vm is None:
+            raise ValueError(f"VM '{vm_name}' not found")
+        return {
+            "statuses": [
+                {"code": vm.power_state.value, "display_status": vm.power_state.name},
+                {
+                    "code": f"ProvisioningState/{vm.provisioning_state.value.lower()}",
+                    "display_status": vm.provisioning_state.value,
+                },
+            ],
+        }
+
+    @staticmethod
+    def _extract_vm_size(parameters: dict) -> str:
+        hp = parameters.get("hardware_profile", {})
+        if isinstance(hp, dict) and "vm_size" in hp:
+            return hp["vm_size"]
+        props = parameters.get("properties", {})
+        if isinstance(props, dict):
+            hp2 = props.get("hardwareProfile", {})
+            if isinstance(hp2, dict) and "vmSize" in hp2:
+                return hp2["vmSize"]
+        raise ValueError(
+            "parameters must contain hardware_profile.vm_size or "
+            "properties.hardwareProfile.vmSize"
+        )
+
+
+# ---------------------------------------------------------------------------
+# DigitalTwinComputeManagementClient
+# ---------------------------------------------------------------------------
+
 class DigitalTwinComputeManagementClient:
-    """Offline digital twin of ``azure.mgmt.compute.ComputeManagementClient``.
+    """Drop-in replacement for ``azure.mgmt.compute.ComputeManagementClient``.
 
-    Provides the ``virtual_machine_sizes`` attribute with the same iteration
-    interface as the real client, enabling SDK-compatible code to run against
-    the E-series catalog without Azure credentials or network access.
+    Supports two modes:
 
-    Args:
-        credential: Accepted for API compatibility; ignored by the twin.
-        subscription_id: Accepted for API compatibility; ignored by the twin.
-        series_filter: Optionally limit to specific E sub-series.
+    1. **Standalone** (catalog-only) — pass ``series_filter`` and it will
+       create its own VMInstanceManager.  Good for listing sizes.
+
+    2. **Simulation** — pass a pre-configured ``instance_manager`` to get
+       full VM lifecycle operations backed by cgroup enforcement.
+
+    Example (standalone)::
+
+        client = DigitalTwinComputeManagementClient(credential=None)
+        for size in client.virtual_machine_sizes.list("eastus"):
+            print(size.name)
+
+    Example (simulation, via AzureESeriesDigitalTwin)::
+
+        twin = AzureESeriesDigitalTwin()
+        client = twin.as_compute_client()
+        poller = client.virtual_machines.begin_create_or_update(
+            "my-rg", "test-vm",
+            {"hardware_profile": {"vm_size": "Standard_E16s_v5"}},
+        )
+        vm = poller.result()
     """
 
     def __init__(
         self,
         credential: Any = None,
         subscription_id: str = "digital-twin",
+        *,
         series_filter: Optional[list[str]] = None,
+        instance_manager: Optional[VMInstanceManager] = None,
+        runner: Optional[WorkloadRunner] = None,
     ) -> None:
-        self._catalog = ESeriesCatalog(series_filter=series_filter)
+        if instance_manager is not None:
+            self._manager = instance_manager
+            self._catalog = instance_manager._catalog
+        else:
+            self._catalog = ESeriesCatalog(series_filter=series_filter)
+            self._manager = VMInstanceManager(catalog=self._catalog)
+
+        self._runner = runner
+        self.subscription_id = subscription_id
+
         self.virtual_machine_sizes = VirtualMachineSizesOperations(self._catalog)
+        self.virtual_machines = VirtualMachinesOperations(
+            self._manager, self._runner
+        )
 
     @property
     def catalog(self) -> ESeriesCatalog:
-        """Access the underlying E-series catalog for extended queries."""
         return self._catalog
 
     def close(self) -> None:
-        """No-op for API compatibility."""
+        self._manager.cleanup()
 
     def __enter__(self) -> "DigitalTwinComputeManagementClient":
         return self

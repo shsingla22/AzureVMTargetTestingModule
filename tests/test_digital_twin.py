@@ -1,128 +1,257 @@
-"""Tests for the high-level AzureESeriesDigitalTwin orchestrator."""
+"""Tests for the AzureESeriesDigitalTwin simulation orchestrator."""
 
 import pytest
 
 from azure_vm_digital_twin.digital_twin import AzureESeriesDigitalTwin
-from azure_vm_digital_twin.models import (
-    CompatibilityStatus,
-    ProcessorArchitecture,
-)
+from azure_vm_digital_twin.models import VMPowerState
 
 
-class TestAzureESeriesDigitalTwin:
-    def test_instantiation(self):
+class TestVMLifecycle:
+    def test_create_vm(self):
         twin = AzureESeriesDigitalTwin()
-        assert twin.catalog.count() > 0
+        vm = twin.create_vm("test-01", "Standard_E8s_v5")
+        assert vm.name == "test-01"
+        assert vm.vm_size.name == "Standard_E8s_v5"
+        assert vm.vm_size.number_of_cores == 8
+        assert vm.vm_size.memory_in_mb == 64 * 1024
+        assert vm.power_state == VMPowerState.STOPPED
+        twin.cleanup()
 
-    def test_instantiation_with_filter(self):
-        twin = AzureESeriesDigitalTwin(series_filter=["Esv5", "Edsv5"])
-        assert set(twin.catalog.series_names) == {"Esv5", "Edsv5"}
-
-    def test_profile_from_specs(self):
+    def test_create_vm_bad_size_raises(self):
         twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(
-            hostname="db-prod-01",
-            vcpus=16,
-            memory_mb=128 * 1024,
-            data_disks_count=8,
-            required_iops=25000,
+        with pytest.raises(ValueError, match="Unknown VM size"):
+            twin.create_vm("bad", "Standard_FAKE_v99")
+        twin.cleanup()
+
+    def test_create_duplicate_raises(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("dup", "Standard_E4s_v5")
+        with pytest.raises(ValueError, match="already exists"):
+            twin.create_vm("dup", "Standard_E4s_v5")
+        twin.cleanup()
+
+    def test_start_vm(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("start-test", "Standard_E16s_v5")
+        constraints = twin.start_vm("start-test")
+        vm = twin.get_vm("start-test")
+        assert vm.is_running
+        assert constraints.cpu_cores == 16
+        assert constraints.memory_limit_bytes == 128 * 1024 * 1024 * 1024
+        twin.cleanup()
+
+    def test_stop_vm(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("stop-test", "Standard_E4s_v5")
+        twin.start_vm("stop-test")
+        twin.stop_vm("stop-test")
+        vm = twin.get_vm("stop-test")
+        assert vm.power_state == VMPowerState.STOPPED
+        assert not vm.is_running
+        twin.cleanup()
+
+    def test_deallocate_vm(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("dealloc", "Standard_E2s_v5")
+        twin.start_vm("dealloc")
+        twin.deallocate_vm("dealloc")
+        vm = twin.get_vm("dealloc")
+        assert vm.power_state == VMPowerState.DEALLOCATED
+        twin.cleanup()
+
+    def test_delete_vm(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("del-test", "Standard_E2s_v5")
+        twin.delete_vm("del-test")
+        assert twin.get_vm("del-test") is None
+        twin.cleanup()
+
+    def test_resize_vm(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("resize", "Standard_E4s_v5")
+        vm = twin.resize_vm("resize", "Standard_E16s_v5")
+        assert vm.vm_size.name == "Standard_E16s_v5"
+        assert vm.vm_size.number_of_cores == 16
+        twin.cleanup()
+
+    def test_resize_running_raises(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("resize-run", "Standard_E4s_v5")
+        twin.start_vm("resize-run")
+        with pytest.raises(RuntimeError, match="stopped before resizing"):
+            twin.resize_vm("resize-run", "Standard_E16s_v5")
+        twin.cleanup()
+
+    def test_list_vms(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("a", "Standard_E2s_v5")
+        twin.create_vm("b", "Standard_E4s_v5")
+        vms = twin.list_vms()
+        names = {vm.name for vm in vms}
+        assert names == {"a", "b"}
+        twin.cleanup()
+
+
+class TestWorkloadExecution:
+    def test_run_simple_command(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("work-vm", "Standard_E4s_v5")
+        twin.start_vm("work-vm")
+
+        result = twin.run_workload("work-vm", ["echo", "hello world"])
+        assert result.passed
+        assert result.metrics.exit_code == 0
+        assert "hello world" in result.stdout
+        assert result.vm_size.name == "Standard_E4s_v5"
+        twin.cleanup()
+
+    def test_run_script(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("script-vm", "Standard_E8s_v5")
+        twin.start_vm("script-vm")
+
+        result = twin.run_script("script-vm", "echo $((2 + 3))")
+        assert result.passed
+        assert "5" in result.stdout
+        twin.cleanup()
+
+    def test_run_on_stopped_vm_raises(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("stopped-vm", "Standard_E2s_v5")
+        with pytest.raises(RuntimeError, match="not running"):
+            twin.run_workload("stopped-vm", ["echo", "fail"])
+        twin.cleanup()
+
+    def test_run_nonexistent_vm_raises(self):
+        twin = AzureESeriesDigitalTwin()
+        with pytest.raises(ValueError, match="does not exist"):
+            twin.run_workload("nope", ["echo"])
+        twin.cleanup()
+
+    def test_run_failing_command(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("fail-vm", "Standard_E4s_v5")
+        twin.start_vm("fail-vm")
+
+        result = twin.run_workload("fail-vm", ["false"])
+        assert not result.passed
+        assert result.metrics.exit_code != 0
+        twin.cleanup()
+
+    def test_workload_with_timeout(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("timeout-vm", "Standard_E2s_v5")
+        twin.start_vm("timeout-vm")
+
+        result = twin.run_workload(
+            "timeout-vm", ["sleep", "60"], timeout=1.0
         )
-        assert profile.hostname == "db-prod-01"
-        assert profile.vcpus == 16
-        assert profile.memory_mb == 128 * 1024
+        # Should be killed by timeout
+        assert result.metrics.exit_code != 0
+        twin.cleanup()
 
-    def test_check_vm_size_compatible(self):
+    def test_workload_records_on_vm(self):
         twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(vcpus=4, memory_mb=16 * 1024)
-        result = twin.check_vm_size(profile, "Standard_E4s_v5")
-        assert result is not None
-        assert result.is_compatible
+        twin.create_vm("rec-vm", "Standard_E4s_v5")
+        twin.start_vm("rec-vm")
 
-    def test_check_vm_size_incompatible(self):
-        twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(vcpus=64, memory_mb=512 * 1024)
-        result = twin.check_vm_size(profile, "Standard_E2s_v5")
-        assert result is not None
-        assert not result.is_compatible
+        twin.run_workload("rec-vm", ["echo", "run1"])
+        twin.run_workload("rec-vm", ["echo", "run2"])
 
-    def test_check_vm_size_not_found(self):
-        twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(vcpus=2, memory_mb=8 * 1024)
-        result = twin.check_vm_size(profile, "Standard_NONEXISTENT_v99")
-        assert result is None
+        vm = twin.get_vm("rec-vm")
+        assert len(vm.workload_results) == 2
+        twin.cleanup()
 
-    def test_recommend(self):
+    def test_metrics_has_duration(self):
         twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(
-            hostname="app-server",
-            vcpus=8,
-            memory_mb=64 * 1024,
+        twin.create_vm("dur-vm", "Standard_E4s_v5")
+        twin.start_vm("dur-vm")
+
+        result = twin.run_workload("dur-vm", ["sleep", "0.2"])
+        assert result.metrics.duration_seconds >= 0.1
+        twin.cleanup()
+
+    def test_enforced_constraints_in_result(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("constr-vm", "Standard_E16s_v5")
+        twin.start_vm("constr-vm")
+
+        result = twin.run_workload("constr-vm", ["echo", "ok"])
+        assert "cpu_cores" in result.enforced_constraints
+        assert result.enforced_constraints["cpu_cores"] == 16
+        assert "memory_limit_mb" in result.enforced_constraints
+        twin.cleanup()
+
+    def test_cpu_intensive_workload_produces_metrics(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("cpu-vm", "Standard_E2s_v5")
+        twin.start_vm("cpu-vm")
+
+        result = twin.run_workload(
+            "cpu-vm",
+            ["python3", "-c", "sum(range(10_000_000))"],
         )
-        rec = twin.recommend(profile)
-        assert rec.best_fit is not None
-        assert rec.best_fit.is_compatible
-        assert len(rec.compatible_sizes) > 0
+        assert result.passed
+        assert result.metrics.duration_seconds > 0
+        assert result.metrics.vm_size_name == "Standard_E2s_v5"
+        twin.cleanup()
 
-    def test_recommend_sorts_by_size(self):
-        twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(vcpus=4, memory_mb=16 * 1024)
-        rec = twin.recommend(profile)
-        memories = [r.vm_size.memory_in_mb for r in rec.compatible_sizes]
-        assert memories == sorted(memories)
 
-    def test_as_compute_client(self):
-        twin = AzureESeriesDigitalTwin()
-        client = twin.as_compute_client()
-        sizes = list(client.virtual_machine_sizes.list("eastus"))
-        assert len(sizes) == twin.catalog.count()
-
+class TestReporting:
     def test_generate_report(self):
         twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(
-            hostname="sql-prod",
-            vcpus=16,
-            memory_mb=128 * 1024,
-            data_disks_count=4,
-        )
-        rec = twin.recommend(profile)
-        report = twin.generate_report(rec)
-        assert "sql-prod" in report
-        assert "BEST FIT" in report
-        assert "COMPATIBLE" in report
+        twin.create_vm("rpt-vm", "Standard_E8s_v5")
+        twin.start_vm("rpt-vm")
+        twin.run_workload("rpt-vm", ["echo", "test"])
 
-    def test_generate_report_no_compatible(self):
+        report = twin.generate_report("rpt-vm")
+        assert "Standard_E8s_v5" in report
+        assert "rpt-vm" in report
+        assert "Workload #1" in report
+        assert "PASSED" in report
+        twin.cleanup()
+
+    def test_generate_report_no_workloads(self):
         twin = AzureESeriesDigitalTwin()
-        profile = twin.profile_from_specs(vcpus=1024, memory_mb=999999 * 1024)
-        rec = twin.recommend(profile)
-        report = twin.generate_report(rec)
-        assert "NO COMPATIBLE" in report
+        twin.create_vm("empty-vm", "Standard_E4s_v5")
+        report = twin.generate_report("empty-vm")
+        assert "No workloads" in report
+        twin.cleanup()
 
-    def test_end_to_end_migration_scenario(self):
-        """Full end-to-end: profile -> recommend -> report."""
+    def test_generate_report_unknown_vm(self):
         twin = AzureESeriesDigitalTwin()
+        report = twin.generate_report("ghost")
+        assert "not found" in report
+        twin.cleanup()
 
-        # Simulate a mid-size database server
-        profile = twin.profile_from_specs(
-            hostname="oltp-db-01",
-            vcpus=32,
-            memory_mb=256 * 1024,
-            os_type="Linux",
-            data_disks_count=16,
-            required_iops=50000,
-            required_throughput_mbps=800,
-            required_nics=2,
-            requires_premium_io=True,
-        )
+    def test_workload_result_summary(self):
+        twin = AzureESeriesDigitalTwin()
+        twin.create_vm("sum-vm", "Standard_E4s_v5")
+        twin.start_vm("sum-vm")
+        result = twin.run_workload("sum-vm", ["echo", "test"])
 
-        rec = twin.recommend(profile)
-        assert rec.best_fit is not None
+        summary = result.summary()
+        assert "PASSED" in summary
+        assert "Standard_E4s_v5" in summary
+        assert "CPU:" in summary
+        assert "Memory:" in summary
+        assert "I/O:" in summary
+        twin.cleanup()
 
-        best = rec.best_fit.vm_size
-        assert best.number_of_cores >= 32
-        assert best.memory_in_mb >= 256 * 1024
-        assert best.storage.max_data_disk_count >= 16
-        assert best.storage.max_iops >= 50000
 
-        report = twin.generate_report(rec)
-        assert "oltp-db-01" in report
-        assert best.name in report
+class TestVMInstance:
+    def test_vm_id_format(self):
+        twin = AzureESeriesDigitalTwin()
+        vm = twin.create_vm("id-test", "Standard_E2s_v5")
+        assert "/subscriptions/digital-twin/" in vm.id
+        assert "id-test" in vm.id
+        twin.cleanup()
+
+    def test_vm_as_sdk_dict(self):
+        twin = AzureESeriesDigitalTwin()
+        vm = twin.create_vm("dict-test", "Standard_E4s_v5")
+        d = vm.as_sdk_dict()
+        assert d["name"] == "dict-test"
+        assert d["properties"]["hardwareProfile"]["vmSize"] == "Standard_E4s_v5"
+        assert "instanceView" in d["properties"]
+        twin.cleanup()

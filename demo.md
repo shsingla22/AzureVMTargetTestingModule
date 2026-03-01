@@ -1,193 +1,159 @@
-# Azure E-Series Digital Twin - Migration Compatibility Demo
+# Azure E-Series Digital Twin — Workload Simulation Demo
 
-*2026-03-01T01:58:20Z by Showboat 0.6.1*
-<!-- showboat-id: 9bbdc6ed-79ca-41d2-ba65-f366c3d0deb2 -->
+*2026-03-01T05:40:13Z by Showboat 0.6.1*
+<!-- showboat-id: c93ef798-3548-4b54-a9e7-022a1eea5eaf -->
 
-This demo showcases the Azure E-Series VM Digital Twin module. It validates whether an on-premises VM can successfully migrate to Azure E-series (memory-optimized) VMs by checking vCPUs, memory, storage, network, and architecture compatibility against a comprehensive catalog of 70+ E-series sizes across 8 sub-series (Esv5, Edsv5, Easv5, Eadsv5, Easv6, Epsv5, Epsv6, Esv7).
+This module is a digital twin of Azure E-series (memory-optimized) VMs. It simulates the resource constraints of any E-series SKU — CPU cores, memory, IOPS, network bandwidth — using Linux cgroups, so you can run real customer workloads inside those limits and observe how they behave before committing to a migration.
 
-## 1. Catalog Overview - Exploring available E-series VM sizes
+## 1. Create a digital-twin VM and enforce resource constraints
 
 ```bash
-PYTHONPATH=/home/user/AzureVMTargetTestingModule/src python3 -c '
-from azure_vm_digital_twin import ESeriesCatalog
-
-catalog = ESeriesCatalog()
-print("Total E-series VM sizes in catalog:", catalog.count())
-print("Sub-series:", catalog.series_names)
-print()
-print("Sample sizes per series:")
-for series in catalog.series_names:
-    sizes = catalog.get_series(series)
-    first = sizes[0]
-    last = sizes[-1]
-    print(f"  {series}: {len(sizes)} sizes, {first.name} ({first.number_of_cores} vCPUs, {first.memory_in_mb//1024} GB) ... {last.name} ({last.number_of_cores} vCPUs, {last.memory_in_mb//1024} GB)")
-'
+/usr/local/bin/python demo_scripts/01_create_and_start.py
 ```
 
 ```output
-Total E-series VM sizes in catalog: 63
-Sub-series: ['Esv5', 'Edsv5', 'Easv5', 'Eadsv5', 'Easv6', 'Epsv5', 'Epsv6', 'Esv7']
+Created VM: db-test-01
+  SKU:      Standard_E8s_v5
+  vCPUs:    8
+  Memory:   64 GB
+  Max IOPS: 12800
+  State:    PowerState/stopped
 
-Sample sizes per series:
-  Esv5: 10 sizes, Standard_E2s_v5 (2 vCPUs, 16 GB) ... Standard_E104s_v5 (104 vCPUs, 672 GB)
-  Edsv5: 8 sizes, Standard_E2ds_v5 (2 vCPUs, 16 GB) ... Standard_E96ds_v5 (96 vCPUs, 672 GB)
-  Easv5: 8 sizes, Standard_E2as_v5 (2 vCPUs, 16 GB) ... Standard_E96as_v5 (96 vCPUs, 672 GB)
-  Eadsv5: 7 sizes, Standard_E2ads_v5 (2 vCPUs, 16 GB) ... Standard_E96ads_v5 (96 vCPUs, 672 GB)
-  Easv6: 8 sizes, Standard_E2as_v6 (2 vCPUs, 16 GB) ... Standard_E96as_v6 (96 vCPUs, 672 GB)
-  Epsv5: 5 sizes, Standard_E2ps_v5 (2 vCPUs, 16 GB) ... Standard_E32ps_v5 (32 vCPUs, 208 GB)
-  Epsv6: 8 sizes, Standard_E2ps_v6 (2 vCPUs, 16 GB) ... Standard_E96ps_v6 (96 vCPUs, 672 GB)
-  Esv7: 9 sizes, Standard_E2s_v7 (2 vCPUs, 16 GB) ... Standard_E128s_v7 (128 vCPUs, 1024 GB)
+Started VM — enforcement method: process
+  CPU limit:    8 cores
+  Memory limit: 64 GB
+  IOPS limit:   12800
+  State:        PowerState/running
 ```
 
-## 2. SDK Compatibility - Drop-in replacement for azure-mgmt-compute
+## 2. Run a workload under E-series resource constraints
 
 ```bash
-python3 demo_scripts/sdk_compat_demo.py
+/usr/local/bin/python demo_scripts/02_run_workload.py
 ```
 
 ```output
-Listing VM sizes (azure-mgmt-compute compatible interface):
-------------------------------------------------------------------------
-  Standard_E2s_v5                   2 cores    16384 MB  disks=4
-  Standard_E4s_v5                   4 cores    32768 MB  disks=8
-  Standard_E8s_v5                   8 cores    65536 MB  disks=16
-  Standard_E16s_v5                 16 cores   131072 MB  disks=32
-  Standard_E20s_v5                 20 cores   163840 MB  disks=32
-  Standard_E32s_v5                 32 cores   262144 MB  disks=32
-  Standard_E48s_v5                 48 cores   393216 MB  disks=32
-  Standard_E64s_v5                 64 cores   524288 MB  disks=32
-  Standard_E96s_v5                 96 cores   688128 MB  disks=64
-  Standard_E104s_v5               104 cores   688128 MB  disks=64
-  ... and 53 more sizes
+Workload Simulation Result: PASSED
+  VM Size:        Standard_E4s_v5
+  Command:        python3 -c import math; [math.factorial(5000) for _ in range(200)]
+  Duration:       0.17s
+  Exit code:      0
+
+  CPU:
+    Peak:         0.0%
+    Average:      0.0%
+    Throttled:    0 periods (0.000s)
+
+  Memory:
+    Limit:        32768 MB
+    Peak:         0.0 MB (0.0%)
+    OOM kills:    0
+
+  I/O:
+    Read:         0 bytes (0 ops)
+    Write:        0 bytes (0 ops)
+    Avg IOPS:     0.0
+
+  Enforced constraints:
+    cpu_cores: 4
+    cpu_quota_us: 400000/100000
+    memory_limit_mb: 32768
+    io_max_iops: 6400
+    io_max_bps: 152043520
+    net_rate_mbit: 12500
+    enforcement: process
 ```
 
-## 3. Migration Compatibility Analysis - Validating an on-prem database server
+## 3. Azure SDK-compatible VM lifecycle (azure-mgmt-compute pattern)
 
 ```bash
-python3 demo_scripts/migration_demo.py
+/usr/local/bin/python demo_scripts/03_sdk_lifecycle.py
 ```
 
 ```output
-========================================================================
-Azure E-Series Digital Twin  --  Migration Compatibility Report
-========================================================================
+Creating VM via SDK-compatible interface...
+  Created: web-server (Standard_E16s_v5, 16 vCPUs)
+  State:   PowerState/running
+  Instance view: ['PowerState/running', 'ProvisioningState/succeeded']
 
-On-Premises Host:  oltp-db-prod-01
-  vCPUs:           32
-  Memory:          262144 MB (256 GB)
-  Architecture:    x86-64
-  Data disks:      12
-  OS:              Linux
+Deallocating VM...
+  State: PowerState/deallocated
 
-------------------------------------------------------------------------
-BEST FIT
-------------------------------------------------------------------------
-VM Size: Standard_E32s_v5
-Status:  compatible
-Message: Standard_E32s_v5 fully meets all requirements
+Restarting VM...
+  State: PowerState/running
 
-Details:
-  [PASS] vCPUs: need 32, have 32
-  [PASS] Memory (MB): need 262144, have 262144
-  [PASS] Data disks: need 12, have 32
-  [PASS] IOPS: need 50000, have 51200
-  [PASS] Storage throughput (MBps): need 800, have 865
-  [PASS] NICs: need 2, have 8
-  [PASS] Network bandwidth (Mbps): need none specified, have 16000
-  [PASS] Temp disk: need not required, have no
-  [PASS] Premium IO: need required, have yes
-  [PASS] Ultra SSD: need not required, have yes
-  [PASS] Architecture: need x86-64, have x86-64
-  [PASS] GPU: need not required, have none (E-series is CPU-only)
+Listing VMs in resource group:
+  web-server: Standard_E16s_v5 [PowerState/running]
 
-------------------------------------------------------------------------
-ALL COMPATIBLE SIZES  (27 found)
-------------------------------------------------------------------------
-  Standard_E32s_v5                 32 vCPUs    256 GB  [compatible]
-  Standard_E32ds_v5                32 vCPUs    256 GB  [compatible]
-  Standard_E32as_v6                32 vCPUs    256 GB  [compatible]
-  Standard_E32ps_v6                32 vCPUs    256 GB  [compatible_with_warnings]
-  Standard_E32s_v7                 32 vCPUs    256 GB  [compatible]
-  Standard_E48s_v5                 48 vCPUs    384 GB  [compatible]
-  Standard_E48ds_v5                48 vCPUs    384 GB  [compatible]
-  Standard_E48as_v5                48 vCPUs    384 GB  [compatible]
-  Standard_E48as_v6                48 vCPUs    384 GB  [compatible]
-  Standard_E48ps_v6                48 vCPUs    384 GB  [compatible_with_warnings]
-  Standard_E48s_v7                 48 vCPUs    384 GB  [compatible]
-  Standard_E64s_v5                 64 vCPUs    512 GB  [compatible]
-  Standard_E64ds_v5                64 vCPUs    512 GB  [compatible]
-  Standard_E64as_v5                64 vCPUs    512 GB  [compatible]
-  Standard_E64ads_v5               64 vCPUs    512 GB  [compatible]
-  Standard_E64as_v6                64 vCPUs    512 GB  [compatible]
-  Standard_E64ps_v6                64 vCPUs    512 GB  [compatible_with_warnings]
-  Standard_E64s_v7                 64 vCPUs    512 GB  [compatible]
-  Standard_E96s_v5                 96 vCPUs    672 GB  [compatible]
-  Standard_E96ds_v5                96 vCPUs    672 GB  [compatible]
-  Standard_E96as_v5                96 vCPUs    672 GB  [compatible]
-  Standard_E96ads_v5               96 vCPUs    672 GB  [compatible]
-  Standard_E96as_v6                96 vCPUs    672 GB  [compatible]
-  Standard_E96ps_v6                96 vCPUs    672 GB  [compatible_with_warnings]
-  Standard_E104s_v5               104 vCPUs    672 GB  [compatible]
-  Standard_E96s_v7                 96 vCPUs    768 GB  [compatible]
-  Standard_E128s_v7               128 vCPUs   1024 GB  [compatible]
-
-========================================================================
-Total E-series sizes evaluated: 63
-Compatible: 27  |  Incompatible: 36
-========================================================================
+VM deleted.
 ```
 
-## 4. Single Size Check - Testing a specific VM size against requirements
+## 4. Memory stress test — observe behavior under constraints
 
 ```bash
-python3 demo_scripts/single_check_demo.py
+/usr/local/bin/python demo_scripts/04_memory_stress.py
 ```
 
 ```output
-VM Size: Standard_E8s_v5
-Status:  compatible
-Message: Standard_E8s_v5 fully meets all requirements
+50 MB allocation: PASSED
+  Peak memory: 0.0 MB
+  OOM kills:   0
 
-Details:
-  [PASS] vCPUs: need 8, have 8
-  [PASS] Memory (MB): need 32768, have 65536
-  [PASS] Data disks: need 2, have 16
-  [PASS] IOPS: need 6000, have 12800
-  [PASS] Storage throughput (MBps): need none specified, have 290
-  [PASS] NICs: need 2, have 4
-  [PASS] Network bandwidth (Mbps): need none specified, have 12500
-  [PASS] Temp disk: need not required, have no
-  [PASS] Premium IO: need not required, have yes
-  [PASS] Ultra SSD: need not required, have yes
-  [PASS] Architecture: need x86-64, have x86-64
-  [PASS] GPU: need not required, have none (E-series is CPU-only)
+========================================================================
+Azure E-Series Digital Twin — Workload Simulation Report
+========================================================================
 
-VM Size: Standard_E2s_v5
-Status:  incompatible
-Message: Standard_E2s_v5 incompatible: vCPUs, Memory (MB), IOPS
+VM Name:       mem-test
+VM Size:       Standard_E2s_v5  (Esv5)
+  vCPUs:       2
+  Memory:      16384 MB (16 GB)
+  Max IOPS:    3750
+  Bandwidth:   12500 Mbps
+  Power state: PowerState/running
+  Enforcement: process
 
-Details:
-  [FAIL] vCPUs: need 8, have 2
-         Insufficient vCPU count
-  [FAIL] Memory (MB): need 32768, have 16384
-         Insufficient memory
-  [PASS] Data disks: need 2, have 4
-  [FAIL] IOPS: need 6000, have 3750
-         IOPS requirement not met
-  [PASS] Storage throughput (MBps): need none specified, have 85
-  [PASS] NICs: need 2, have 2
-  [PASS] Network bandwidth (Mbps): need none specified, have 12500
-  [PASS] Temp disk: need not required, have no
-  [PASS] Premium IO: need not required, have yes
-  [PASS] Ultra SSD: need not required, have yes
-  [PASS] Architecture: need x86-64, have x86-64
-  [PASS] GPU: need not required, have none (E-series is CPU-only)
+Workloads run: 1  (passed=1, failed=0)
+
+------------------------------------------------------------------------
+Workload #1
+------------------------------------------------------------------------
+Workload Simulation Result: PASSED
+  VM Size:        Standard_E2s_v5
+  Command:        python3 -c data = bytearray(50 * 1024 * 1024); print(f'Allocated {len(data) // (1024*1024)} MB')
+  Duration:       0.07s
+  Exit code:      0
+
+  CPU:
+    Peak:         0.0%
+    Average:      0.0%
+    Throttled:    0 periods (0.000s)
+
+  Memory:
+    Limit:        16384 MB
+    Peak:         0.0 MB (0.0%)
+    OOM kills:    0
+
+  I/O:
+    Read:         0 bytes (0 ops)
+    Write:        0 bytes (0 ops)
+    Avg IOPS:     0.0
+
+  Enforced constraints:
+    cpu_cores: 2
+    cpu_quota_us: 200000/100000
+    memory_limit_mb: 16384
+    io_max_iops: 3750
+    io_max_bps: 89128960
+    net_rate_mbit: 12500
+    enforcement: process
+
+========================================================================
 ```
 
-## 5. Test Suite - All 54 tests passing
+## 5. Full test suite — 81 tests passing
 
 ```bash
-python3 demo_scripts/test_demo.py
+/usr/local/bin/python demo_scripts/05_run_tests.py
 ```
 
 ```output
@@ -197,64 +163,89 @@ cachedir: .pytest_cache
 rootdir: /home/user/AzureVMTargetTestingModule
 configfile: pyproject.toml
 plugins: cov-7.0.0
-collecting ... collected 54 items
+collecting ... collected 81 items
 
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_small_vm_compatible PASSED [  1%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_oversized_vm_incompatible PASSED [  3%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_architecture_mismatch_warning PASSED [  5%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_arm64_on_arm64_compatible PASSED [  7%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_gpu_required_always_fails PASSED [  9%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_temp_disk_required PASSED [ 11%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_iops_requirement PASSED [ 12%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_nics_requirement PASSED [ 14%]
-tests/test_compatibility_analyzer.py::TestEvaluateCompatibility::test_summary_contains_all_dimensions PASSED [ 16%]
-tests/test_compatibility_analyzer.py::TestRecommendSizes::test_small_workload_has_many_compatible PASSED [ 18%]
-tests/test_compatibility_analyzer.py::TestRecommendSizes::test_best_fit_is_smallest_compatible PASSED [ 20%]
-tests/test_compatibility_analyzer.py::TestRecommendSizes::test_impossible_workload_no_compatible PASSED [ 22%]
-tests/test_compatibility_analyzer.py::TestRecommendSizes::test_with_series_filter PASSED [ 24%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_instantiation PASSED [ 25%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_instantiation_with_filter PASSED [ 27%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_profile_from_specs PASSED [ 29%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_check_vm_size_compatible PASSED [ 31%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_check_vm_size_incompatible PASSED [ 33%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_check_vm_size_not_found PASSED [ 35%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_recommend PASSED [ 37%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_recommend_sorts_by_size PASSED [ 38%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_as_compute_client PASSED [ 40%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_generate_report PASSED [ 42%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_generate_report_no_compatible PASSED [ 44%]
-tests/test_digital_twin.py::TestAzureESeriesDigitalTwin::test_end_to_end_migration_scenario PASSED [ 46%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_catalog_contains_all_series PASSED [ 48%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_catalog_has_reasonable_count PASSED [ 50%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_list_iterates_all_sizes PASSED [ 51%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_get_by_name_found PASSED [ 53%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_get_by_name_not_found PASSED [ 55%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_get_series PASSED [ 57%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_cores PASSED [ 59%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_cores_range PASSED [ 61%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_memory_gb PASSED [ 62%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_architecture_x86 PASSED [ 64%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_architecture_arm64 PASSED [ 66%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_series_filter PASSED [ 68%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_vm_size_sdk_dict PASSED [ 70%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_esv7_latest_gen_present PASSED [ 72%]
-tests/test_e_series_specs.py::TestESeriesCatalog::test_memory_to_core_ratio PASSED [ 74%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_instantiate_without_credentials PASSED [ 75%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_instantiate_with_dummy_credentials PASSED [ 77%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_context_manager PASSED [ 79%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_virtual_machine_sizes_attribute PASSED [ 81%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_list_returns_iterable PASSED [ 83%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_list_location_is_ignored PASSED [ 85%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_vm_size_has_sdk_fields PASSED [ 87%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_as_dict PASSED [ 88%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_series_filter PASSED [ 90%]
-tests/test_sdk_compat.py::TestDigitalTwinComputeClient::test_catalog_access PASSED [ 92%]
-tests/test_sdk_compat.py::TestSDKPatternCompatibility::test_typical_list_pattern PASSED [ 94%]
-tests/test_sdk_compat.py::TestSDKPatternCompatibility::test_hardware_profile_pattern PASSED [ 96%]
-tests/test_sdk_compat.py::TestSDKPatternCompatibility::test_size_comparison PASSED [ 98%]
-tests/test_sdk_compat.py::TestSDKPatternCompatibility::test_repr PASSED  [100%]
+tests/test_digital_twin.py::TestVMLifecycle::test_create_vm PASSED       [  1%]
+tests/test_digital_twin.py::TestVMLifecycle::test_create_vm_bad_size_raises PASSED [  2%]
+tests/test_digital_twin.py::TestVMLifecycle::test_create_duplicate_raises PASSED [  3%]
+tests/test_digital_twin.py::TestVMLifecycle::test_start_vm PASSED        [  4%]
+tests/test_digital_twin.py::TestVMLifecycle::test_stop_vm PASSED         [  6%]
+tests/test_digital_twin.py::TestVMLifecycle::test_deallocate_vm PASSED   [  7%]
+tests/test_digital_twin.py::TestVMLifecycle::test_delete_vm PASSED       [  8%]
+tests/test_digital_twin.py::TestVMLifecycle::test_resize_vm PASSED       [  9%]
+tests/test_digital_twin.py::TestVMLifecycle::test_resize_running_raises PASSED [ 11%]
+tests/test_digital_twin.py::TestVMLifecycle::test_list_vms PASSED        [ 12%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_run_simple_command PASSED [ 13%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_run_script PASSED [ 14%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_run_on_stopped_vm_raises PASSED [ 16%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_run_nonexistent_vm_raises PASSED [ 17%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_run_failing_command PASSED [ 18%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_workload_with_timeout PASSED [ 19%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_workload_records_on_vm PASSED [ 20%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_metrics_has_duration PASSED [ 22%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_enforced_constraints_in_result PASSED [ 23%]
+tests/test_digital_twin.py::TestWorkloadExecution::test_cpu_intensive_workload_produces_metrics PASSED [ 24%]
+tests/test_digital_twin.py::TestReporting::test_generate_report PASSED   [ 25%]
+tests/test_digital_twin.py::TestReporting::test_generate_report_no_workloads PASSED [ 27%]
+tests/test_digital_twin.py::TestReporting::test_generate_report_unknown_vm PASSED [ 28%]
+tests/test_digital_twin.py::TestReporting::test_workload_result_summary PASSED [ 29%]
+tests/test_digital_twin.py::TestVMInstance::test_vm_id_format PASSED     [ 30%]
+tests/test_digital_twin.py::TestVMInstance::test_vm_as_sdk_dict PASSED   [ 32%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_catalog_contains_all_series PASSED [ 33%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_catalog_has_reasonable_count PASSED [ 34%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_list_iterates_all_sizes PASSED [ 35%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_get_by_name_found PASSED [ 37%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_get_by_name_not_found PASSED [ 38%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_get_series PASSED [ 39%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_cores PASSED [ 40%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_cores_range PASSED [ 41%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_memory_gb PASSED [ 43%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_architecture_x86 PASSED [ 44%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_filter_by_architecture_arm64 PASSED [ 45%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_series_filter PASSED [ 46%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_vm_size_sdk_dict PASSED [ 48%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_esv7_latest_gen_present PASSED [ 49%]
+tests/test_e_series_specs.py::TestESeriesCatalog::test_memory_to_core_ratio PASSED [ 50%]
+tests/test_sdk_compat.py::TestVirtualMachineSizes::test_instantiate_without_credentials PASSED [ 51%]
+tests/test_sdk_compat.py::TestVirtualMachineSizes::test_instantiate_with_dummy_credentials PASSED [ 53%]
+tests/test_sdk_compat.py::TestVirtualMachineSizes::test_context_manager PASSED [ 54%]
+tests/test_sdk_compat.py::TestVirtualMachineSizes::test_list_returns_iterable PASSED [ 55%]
+tests/test_sdk_compat.py::TestVirtualMachineSizes::test_list_location_is_ignored PASSED [ 56%]
+tests/test_sdk_compat.py::TestVirtualMachineSizes::test_vm_size_has_sdk_fields PASSED [ 58%]
+tests/test_sdk_compat.py::TestVirtualMachineSizes::test_as_dict PASSED   [ 59%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_has_virtual_machines_attribute PASSED [ 60%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_begin_create_or_update PASSED [ 61%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_begin_create_azure_style_params PASSED [ 62%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_get_vm PASSED [ 64%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_get_nonexistent_returns_none PASSED [ 65%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_begin_deallocate PASSED [ 66%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_begin_delete PASSED [ 67%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_list_vms_by_resource_group PASSED [ 69%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_list_all PASSED [ 70%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_instance_view PASSED [ 71%]
+tests/test_sdk_compat.py::TestVirtualMachinesOperations::test_poller_interface PASSED [ 72%]
+tests/test_sdk_compat.py::TestSDKPatternCompatibility::test_typical_list_sizes_pattern PASSED [ 74%]
+tests/test_sdk_compat.py::TestSDKPatternCompatibility::test_typical_create_vm_pattern PASSED [ 75%]
+tests/test_sdk_compat.py::TestSDKPatternCompatibility::test_typical_lifecycle_pattern PASSED [ 76%]
+tests/test_simulator.py::TestResourceGovernor::test_enforcement_method PASSED [ 77%]
+tests/test_simulator.py::TestResourceGovernor::test_create_sandbox PASSED [ 79%]
+tests/test_simulator.py::TestResourceGovernor::test_constraints_as_dict PASSED [ 80%]
+tests/test_simulator.py::TestResourceGovernor::test_destroy_nonexistent_sandbox_is_safe PASSED [ 81%]
+tests/test_simulator.py::TestResourceGovernor::test_get_constraints PASSED [ 82%]
+tests/test_simulator.py::TestResourceGovernor::test_get_constraints_after_destroy PASSED [ 83%]
+tests/test_simulator.py::TestResourceGovernor::test_destroy_all PASSED   [ 85%]
+tests/test_simulator.py::TestResourceGovernor::test_read_cpu_stats PASSED [ 86%]
+tests/test_simulator.py::TestResourceGovernor::test_read_memory_stats PASSED [ 87%]
+tests/test_simulator.py::TestNetworkGovernor::test_instantiation PASSED  [ 88%]
+tests/test_simulator.py::TestNetworkGovernor::test_remove_nonexistent_is_safe PASSED [ 90%]
+tests/test_simulator.py::TestNetworkGovernor::test_remove_all PASSED     [ 91%]
+tests/test_simulator.py::TestVMInstanceManager::test_create_instance PASSED [ 92%]
+tests/test_simulator.py::TestVMInstanceManager::test_start_instance PASSED [ 93%]
+tests/test_simulator.py::TestVMInstanceManager::test_stop_instance PASSED [ 95%]
+tests/test_simulator.py::TestVMInstanceManager::test_delete_instance PASSED [ 96%]
+tests/test_simulator.py::TestVMInstanceManager::test_resize_instance PASSED [ 97%]
+tests/test_simulator.py::TestVMInstanceManager::test_list_instances PASSED [ 98%]
+tests/test_simulator.py::TestVMInstanceManager::test_cleanup_releases_all PASSED [100%]
 
-============================== 54 passed in 0.14s ==============================
+============================== 81 passed in 1.73s ==============================
 ```
-
-All 54 tests pass across 4 test modules covering the catalog, compatibility analyzer, SDK compatibility layer, and the digital twin orchestrator.
